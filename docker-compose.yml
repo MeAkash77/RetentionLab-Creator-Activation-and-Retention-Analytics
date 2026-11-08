@@ -1,0 +1,119 @@
+services:
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+
+  postgres:
+    image: postgres:16-alpine
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+
+    ports:
+      - "55432:5432"
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      DATABASE_URL_SYNC: "postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM_NAME: ${EVENT_STREAM_NAME:-events:ingest}
+      EVENT_STREAM_SCHEMA_VERSION: ${EVENT_STREAM_SCHEMA_VERSION:-1}
+      EVENT_STREAM_GROUP: ${EVENT_STREAM_GROUP:-retention-event-workers}
+      EVENT_STREAM_BLOCK_MS: ${EVENT_STREAM_BLOCK_MS:-5000}
+      EVENT_STREAM_READ_COUNT: ${EVENT_STREAM_READ_COUNT:-100}
+      EVENT_STREAM_RETRY_IDLE_MS: ${EVENT_STREAM_RETRY_IDLE_MS:-30000}
+      EVENT_STREAM_MAX_DELIVERIES: ${EVENT_STREAM_MAX_DELIVERIES:-5}
+      EVENT_STREAM_DLQ_NAME: ${EVENT_STREAM_DLQ_NAME:-events:ingest:dlq}
+      EVENT_STREAM_DLQ_MAXLEN: ${EVENT_STREAM_DLQ_MAXLEN:-10000}
+      EVENT_DB_BATCH_SIZE: ${EVENT_DB_BATCH_SIZE:-100}
+      EVENT_PIPELINE_FRESHNESS_KEY: ${EVENT_PIPELINE_FRESHNESS_KEY:-events:pipeline:freshness}
+      EVENT_PIPELINE_FRESHNESS_SLA_SECONDS: ${EVENT_PIPELINE_FRESHNESS_SLA_SECONDS:-60}
+      EVENT_STREAM_BACKLOG_LIMIT: ${EVENT_STREAM_BACKLOG_LIMIT:-50000}
+      EVENT_STREAM_RETRY_AFTER_SECONDS: ${EVENT_STREAM_RETRY_AFTER_SECONDS:-5}
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - ./backend/app/ml/artifacts:/app/app/ml/artifacts
+
+  event-worker:
+    build: ./backend
+    command: python -m app.jobs.consume_events
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      DATABASE_URL_SYNC: "postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM_NAME: ${EVENT_STREAM_NAME:-events:ingest}
+      EVENT_STREAM_SCHEMA_VERSION: ${EVENT_STREAM_SCHEMA_VERSION:-1}
+      EVENT_STREAM_GROUP: ${EVENT_STREAM_GROUP:-retention-event-workers}
+      EVENT_STREAM_BLOCK_MS: ${EVENT_STREAM_BLOCK_MS:-5000}
+      EVENT_STREAM_READ_COUNT: ${EVENT_STREAM_READ_COUNT:-100}
+      EVENT_STREAM_RETRY_IDLE_MS: ${EVENT_STREAM_RETRY_IDLE_MS:-30000}
+      EVENT_STREAM_MAX_DELIVERIES: ${EVENT_STREAM_MAX_DELIVERIES:-5}
+      EVENT_STREAM_DLQ_NAME: ${EVENT_STREAM_DLQ_NAME:-events:ingest:dlq}
+      EVENT_STREAM_DLQ_MAXLEN: ${EVENT_STREAM_DLQ_MAXLEN:-10000}
+      EVENT_DB_BATCH_SIZE: ${EVENT_DB_BATCH_SIZE:-100}
+      EVENT_PIPELINE_FRESHNESS_KEY: ${EVENT_PIPELINE_FRESHNESS_KEY:-events:pipeline:freshness}
+      EVENT_PIPELINE_FRESHNESS_SLA_SECONDS: ${EVENT_PIPELINE_FRESHNESS_SLA_SECONDS:-60}
+      EVENT_STREAM_BACKLOG_LIMIT: ${EVENT_STREAM_BACKLOG_LIMIT:-50000}
+      EVENT_STREAM_RETRY_AFTER_SECONDS: ${EVENT_STREAM_RETRY_AFTER_SECONDS:-5}
+      EVENT_WORKER_METRICS_PORT: ${EVENT_WORKER_METRICS_PORT:-9101}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    expose:
+      - "9101"
+    healthcheck:
+      disable: true
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: /api/v1
+    ports: ["8080:8080"]
+    depends_on: [backend]
+
+  data-generator:
+    build: ./data-generator
+    env_file: .env
+    environment:
+      DATABASE_URL_SYNC: "postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: [tools]
+
+volumes:
+  postgres-data:
+  redis-data:
